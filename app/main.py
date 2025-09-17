@@ -237,9 +237,9 @@ async def submit_score(inp: ScoreIn, req: Request):
             "INSERT INTO scores (user_id, high_score) VALUES ($1, $2)", 
             uid, inp.score
         )
-        logger.info("점수 저장 완료", user_id=uid, score=inp.score)
+        logger.info("점수 저장 완료!!!", user_id=uid, score=inp.score)
     except Exception as e:
-        logger.error("점수 저장 실패", error=str(e))
+        logger.error("점수 저장 실패!!!", error=str(e))
         raise HTTPException(500, "점수 저장에 실패했습니다")
     finally:
         await pg.close()
