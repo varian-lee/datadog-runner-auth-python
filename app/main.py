@@ -215,6 +215,135 @@ async def logout(resp: Response, req: Request):
 class ScoreIn(BaseModel):
     score: int
 
+class CustomizationIn(BaseModel):
+    bodyColor: str = "white"
+    hatCode: str = "none"
+
+# 🎨 커스터마이징 저장 (업적 조건 검증)
+@app.post("/customization")
+@app.post("/api/customization")
+async def save_customization(inp: CustomizationIn, req: Request):
+    sid = req.cookies.get(COOKIE_NAME)
+    if not sid:
+        raise HTTPException(401)
+    
+    r = await get_redis()
+    uid = await r.get(f"session:{sid}")
+    await r.close()
+    if not uid:
+        raise HTTPException(401)
+    
+    pg = await get_pg()
+    try:
+        # 🏆 업적 조건 검증 - 최고 점수 & 플레이 횟수 조회
+        stats_row = await pg.fetchrow("""
+            SELECT 
+                COALESCE(MAX(high_score), 0) as best_score,
+                COUNT(*) as play_count
+            FROM scores 
+            WHERE user_id = $1
+        """, uid)
+        
+        best_score = int(stats_row["best_score"]) if stats_row else 0
+        play_count = int(stats_row["play_count"]) if stats_row else 0
+        
+        # 🔒 몸 색상 검증: 기본(white) 외 선택 시 플레이 10회 이상 필요
+        if inp.bodyColor != "white" and play_count < 10:
+            logger.warning("커스터마이징 저장 거부 - 플레이 횟수 부족", 
+                          user_id=uid, bodyColor=inp.bodyColor, play_count=play_count)
+            raise HTTPException(403, f"몸 색상 변경은 플레이 10회 이상 필요합니다. (현재: {play_count}회)")
+        
+        # 🔒 모자 검증: 기본(none) 외 선택 시 최고 점수 500점 이상 필요
+        if inp.hatCode != "none" and best_score < 500:
+            logger.warning("커스터마이징 저장 거부 - 최고 점수 부족", 
+                          user_id=uid, hatCode=inp.hatCode, best_score=best_score)
+            raise HTTPException(403, f"모자 변경은 최고 점수 500점 이상 필요합니다. (현재: {best_score}점)")
+        
+        # users 테이블에 customization 컬럼 업데이트
+        await pg.execute(
+            """
+            UPDATE users 
+            SET customization = $2::jsonb 
+            WHERE id = $1
+            """, 
+            uid, 
+            f'{{"bodyColor": "{inp.bodyColor}", "hatCode": "{inp.hatCode}"}}'
+        )
+        logger.info("커스터마이징 저장 완료", user_id=uid, bodyColor=inp.bodyColor, hatCode=inp.hatCode)
+    except HTTPException:
+        raise  # 403 에러는 그대로 전달
+    except Exception as e:
+        logger.error("커스터마이징 저장 실패", error=str(e))
+        raise HTTPException(500, "저장에 실패했습니다")
+    finally:
+        await pg.close()
+    
+    return {"ok": True}
+
+# 🎨 커스터마이징 조회 (업적 정보 포함)
+@app.get("/customization")
+@app.get("/api/customization")
+async def get_customization(req: Request):
+    sid = req.cookies.get(COOKIE_NAME)
+    if not sid:
+        raise HTTPException(401)
+    
+    r = await get_redis()
+    uid = await r.get(f"session:{sid}")
+    await r.close()
+    if not uid:
+        raise HTTPException(401)
+    
+    pg = await get_pg()
+    try:
+        import json
+        
+        # 커스터마이징 데이터 조회
+        row = await pg.fetchrow("SELECT customization FROM users WHERE id = $1", uid)
+        customization = {"bodyColor": "white", "hatCode": "none"}
+        if row and row["customization"]:
+            customization = json.loads(row["customization"])
+        
+        # 🏆 업적 정보 조회 - 최고 점수, 플레이 횟수, 누적 점수
+        stats_row = await pg.fetchrow("""
+            SELECT 
+                COALESCE(MAX(high_score), 0) as best_score,
+                COUNT(*) as play_count,
+                COALESCE(SUM(high_score), 0) as total_score
+            FROM scores 
+            WHERE user_id = $1
+        """, uid)
+        
+        best_score = int(stats_row["best_score"]) if stats_row else 0
+        play_count = int(stats_row["play_count"]) if stats_row else 0
+        total_score = int(stats_row["total_score"]) if stats_row else 0
+        
+        return {
+            **customization,
+            "achievements": {
+                "bestScore": best_score,
+                "playCount": play_count,
+                "totalScore": total_score,
+                "canSelectHat": best_score >= 500,       # 최고점수 500 이상
+                "canSelectColor": play_count >= 10       # 플레이 10회 이상
+            }
+        }
+    except Exception as e:
+        logger.error("커스터마이징 조회 실패", error=str(e))
+        return {
+            "bodyColor": "white", 
+            "hatCode": "none",
+            "achievements": {
+                "bestScore": 0,
+                "playCount": 0,
+                "totalScore": 0,
+                "canSelectHat": False,
+                "canSelectColor": False
+            }
+        }
+    finally:
+        await pg.close()
+
 @app.post("/score")
 @app.post("/api/score")
 async def submit_score(inp: ScoreIn, req: Request):
