@@ -23,11 +23,11 @@ import redis.asyncio as aioredis
 #from ddtrace import patch_all; patch_all()  # Datadog APM 트레이싱
 import logging
 from starlette.middleware.cors import CORSMiddleware
-from ddtrace import tracer
+from ddtrace import tracer, config
 import structlog
 
 # 🏷️ Datadog APM 서비스 이름 설정 (기본값 fastapi 대신)
-tracer.configure(service='auth-python')
+config.service = 'auth-python'
 
 # Datadog 공식 방식: structlog로 trace correlation 설정
 def tracer_injection(logger, log_method, event_dict):
