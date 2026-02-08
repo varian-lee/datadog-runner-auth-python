@@ -26,6 +26,9 @@ from starlette.middleware.cors import CORSMiddleware
 from ddtrace import tracer
 import structlog
 
+# 🏷️ Datadog APM 서비스 이름 설정 (기본값 fastapi 대신)
+tracer.configure(service='auth-python')
+
 # Datadog 공식 방식: structlog로 trace correlation 설정
 def tracer_injection(logger, log_method, event_dict):
     """Datadog trace correlation을 위한 processor"""
