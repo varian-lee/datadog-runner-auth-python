@@ -119,6 +119,7 @@ class LoginIn(BaseModel):
 class SignupIn(BaseModel):
     id: str    # 최소 3글자 (프론트엔드 및 서버에서 검증)
     pw: str    # 최소 4글자 (프론트엔드 및 서버에서 검증)
+    profile: dict = None  # 회원가입 시 프로필 정보 (선택)
 
 def hash_password(password: str) -> str:
     """
@@ -175,8 +176,13 @@ async def signup(inp: SignupIn, resp: Response):
         raise HTTPException(400, "이미 존재하는 아이디입니다")
     
     # 새 사용자 생성 - SHA-256으로 해싱된 비밀번호와 함께 저장
+    import json
     hashed_pw = hash_password(inp.pw)
-    await pg.execute("INSERT INTO users(id, pw_hash) VALUES ($1, $2)", inp.id, hashed_pw)
+    profile_json = json.dumps(inp.profile) if inp.profile else '{}'
+    await pg.execute(
+        "INSERT INTO users(id, pw_hash, profile) VALUES ($1, $2, $3::jsonb)", 
+        inp.id, hashed_pw, profile_json
+    )
     await pg.close()
     
     # 회원가입 후 자동 로그인 - UX 개선을 위해 바로 세션 생성하고 쿠키 설정
@@ -219,6 +225,13 @@ class CustomizationIn(BaseModel):
     bodyColor: str = "white"
     hatCode: str = "none"
 
+class ProfileIn(BaseModel):
+    gender: str = ""
+    ageGroup: str = ""
+    region: str = ""
+    gameLove: str = ""
+    datadogExp: str = ""
+
 # 🎨 커스터마이징 저장 (업적 조건 검증)
 @app.post("/customization")
 @app.post("/api/customization")
@@ -235,6 +248,8 @@ async def save_customization(inp: CustomizationIn, req: Request):
     
     pg = await get_pg()
     try:
+        import json
+        
         # 🏆 업적 조건 검증 - 최고 점수 & 플레이 횟수 조회
         stats_row = await pg.fetchrow("""
             SELECT 
@@ -247,6 +262,16 @@ async def save_customization(inp: CustomizationIn, req: Request):
         best_score = int(stats_row["best_score"]) if stats_row else 0
         play_count = int(stats_row["play_count"]) if stats_row else 0
         
+        # 📋 프로필 완성도 조회 (별빛/갓 옵션 검증용)
+        profile_row = await pg.fetchrow("SELECT profile FROM users WHERE id = $1", uid)
+        profile = {}
+        if profile_row and profile_row["profile"]:
+            profile = json.loads(profile_row["profile"]) if isinstance(profile_row["profile"], str) else profile_row["profile"]
+        
+        profile_fields = ['gender', 'ageGroup', 'region', 'gameLove', 'datadogExp']
+        filled_count = sum(1 for field in profile_fields if profile.get(field))
+        profile_completion = int((filled_count / len(profile_fields)) * 100)
+        
         # 🔒 몸 색상 검증: 기본(white) 외 선택 시 플레이 10회 이상 필요
         if inp.bodyColor != "white" and play_count < 10:
             logger.warning("커스터마이징 저장 거부 - 플레이 횟수 부족", 
@@ -258,6 +283,17 @@ async def save_customization(inp: CustomizationIn, req: Request):
             logger.warning("커스터마이징 저장 거부 - 최고 점수 부족", 
                           user_id=uid, hatCode=inp.hatCode, best_score=best_score)
             raise HTTPException(403, f"모자 변경은 최고 점수 500점 이상 필요합니다. (현재: {best_score}점)")
+        
+        # 🔒 특별 옵션 검증: 별빛(starlight)/갓(gat) 선택 시 프로필 완성도 100% 필요
+        if inp.bodyColor == "starlight" and profile_completion < 100:
+            logger.warning("커스터마이징 저장 거부 - 히든 조건 미충족 (별빛)", 
+                          user_id=uid, profile_completion=profile_completion)
+            raise HTTPException(403, f"이 색상은 히든 조건 충족이 필요합니다. (현재: {profile_completion}%)")
+        
+        if inp.hatCode == "gat" and profile_completion < 100:
+            logger.warning("커스터마이징 저장 거부 - 히든 조건 미충족 (갓)", 
+                          user_id=uid, profile_completion=profile_completion)
+            raise HTTPException(403, f"이 모자는 히든 조건 충족이 필요합니다. (현재: {profile_completion}%)")
         
         # users 테이블에 customization 컬럼 업데이트
         await pg.execute(
@@ -298,11 +334,20 @@ async def get_customization(req: Request):
     try:
         import json
         
-        # 커스터마이징 데이터 조회
-        row = await pg.fetchrow("SELECT customization FROM users WHERE id = $1", uid)
+        # 커스터마이징 + 프로필 데이터 조회
+        row = await pg.fetchrow("SELECT customization, profile FROM users WHERE id = $1", uid)
         customization = {"bodyColor": "white", "hatCode": "none"}
-        if row and row["customization"]:
-            customization = json.loads(row["customization"])
+        profile = {}
+        if row:
+            if row["customization"]:
+                customization = json.loads(row["customization"]) if isinstance(row["customization"], str) else row["customization"]
+            if row["profile"]:
+                profile = json.loads(row["profile"]) if isinstance(row["profile"], str) else row["profile"]
+        
+        # 📋 프로필 완성도 계산 (5개 필드: gender, ageGroup, region, gameLove, datadogExp)
+        profile_fields = ['gender', 'ageGroup', 'region', 'gameLove', 'datadogExp']
+        filled_count = sum(1 for field in profile_fields if profile.get(field))
+        profile_completion = int((filled_count / len(profile_fields)) * 100)
         
         # 🏆 업적 정보 조회 - 최고 점수, 플레이 횟수, 누적 점수
         stats_row = await pg.fetchrow("""
@@ -324,8 +369,10 @@ async def get_customization(req: Request):
                 "bestScore": best_score,
                 "playCount": play_count,
                 "totalScore": total_score,
-                "canSelectHat": best_score >= 500,       # 최고점수 500 이상
-                "canSelectColor": play_count >= 10       # 플레이 10회 이상
+                "profileCompletion": profile_completion,
+                "canSelectHat": best_score >= 500,           # 최고점수 500 이상
+                "canSelectColor": play_count >= 10,          # 플레이 10회 이상
+                "canSelectSpecial": profile_completion >= 100  # 프로필 완성도 100% (별빛/갓)
             }
         }
     except Exception as e:
@@ -337,10 +384,76 @@ async def get_customization(req: Request):
                 "bestScore": 0,
                 "playCount": 0,
                 "totalScore": 0,
+                "profileCompletion": 0,
                 "canSelectHat": False,
-                "canSelectColor": False
+                "canSelectColor": False,
+                "canSelectSpecial": False
             }
         }
+    finally:
+        await pg.close()
+
+# 📋 프로필 조회
+@app.get("/profile")
+@app.get("/api/profile")
+async def get_profile(req: Request):
+    sid = req.cookies.get(COOKIE_NAME)
+    if not sid:
+        raise HTTPException(401)
+    
+    r = await get_redis()
+    uid = await r.get(f"session:{sid}")
+    await r.close()
+    if not uid:
+        raise HTTPException(401)
+    
+    pg = await get_pg()
+    try:
+        import json
+        row = await pg.fetchrow("SELECT profile FROM users WHERE id = $1", uid)
+        profile = {}
+        if row and row["profile"]:
+            profile = json.loads(row["profile"]) if isinstance(row["profile"], str) else row["profile"]
+        return profile
+    except Exception as e:
+        logger.error("프로필 조회 실패", error=str(e))
+        return {}
+    finally:
+        await pg.close()
+
+# 📋 프로필 저장
+@app.post("/profile")
+@app.post("/api/profile")
+async def save_profile(inp: ProfileIn, req: Request):
+    sid = req.cookies.get(COOKIE_NAME)
+    if not sid:
+        raise HTTPException(401)
+    
+    r = await get_redis()
+    uid = await r.get(f"session:{sid}")
+    await r.close()
+    if not uid:
+        raise HTTPException(401)
+    
+    pg = await get_pg()
+    try:
+        import json
+        profile_data = {
+            "gender": inp.gender,
+            "ageGroup": inp.ageGroup,
+            "region": inp.region,
+            "gameLove": inp.gameLove,
+            "datadogExp": inp.datadogExp
+        }
+        await pg.execute(
+            "UPDATE users SET profile = $2::jsonb WHERE id = $1",
+            uid, json.dumps(profile_data)
+        )
+        logger.info("프로필 저장 완료", user_id=uid, profile=profile_data)
+        return {"ok": True}
+    except Exception as e:
+        logger.error("프로필 저장 실패", error=str(e))
+        raise HTTPException(500, "프로필 저장에 실패했습니다")
     finally:
         await pg.close()
 
