@@ -81,7 +81,7 @@ jobs:
           echo "commit_count=$COMMIT_COUNT" >> $GITHUB_OUTPUT
 
       - name: 📢 Slack - 배포 시작
-        uses: slackapi/slack-github-action@v1.25.0
+        uses: slackapi/slack-github-action@v2.1.1
         continue-on-error: true
         with:
           payload: |
@@ -198,7 +198,7 @@ jobs:
 
       - name: 📢 Slack Notification
         if: always()
-        uses: slackapi/slack-github-action@v1.25.0
+        uses: slackapi/slack-github-action@v2.1.1
         continue-on-error: true
         with:
           payload: |
